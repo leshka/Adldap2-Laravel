@@ -4,12 +4,15 @@ namespace Adldap\Laravel;
 
 use Adldap\Laravel\Traits\ImportsUsers;
 use Adldap\Models\User;
-use Illuminate\Auth\EloquentUserProvider;
+use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Contracts\Hashing\Hasher as HasherContract;
+use Illuminate\Database\Eloquent\Model as EloquentModel;
 
-class AdldapAuthUserProvider extends EloquentUserProvider
+
+class AdldapAuthUserProvider implements UserProvider
 {
     use ImportsUsers;
 
@@ -21,11 +24,34 @@ class AdldapAuthUserProvider extends EloquentUserProvider
     protected $user = null;
 
     /**
+     * The hasher implementation.
+     *
+     * @var \Illuminate\Contracts\Hashing\Hasher
+     */
+    protected $hasher;
+
+    /**
+     * @var string
+     */
+    protected $model;
+
+    public function __construct(HasherContract $hasher, $model)
+    {
+        $this->model = $model;
+        $this->hasher = $hasher;
+    }
+
+    /**
      * {@inheritdoc}
      */
     public function retrieveById($identifier)
     {
-        $model = parent::retrieveById($identifier);
+        if ($this->createModel() instanceof EloquentModel) {
+            $model = $this->createModel()->newQuery()->find($identifier);
+        } else {
+            $repo = \EntityManager::getRepository(get_class($this->createModel()));
+            return $repo->find($identifier);
+        }
 
         return $this->discoverAdldapFromModel($model);
     }
@@ -35,7 +61,20 @@ class AdldapAuthUserProvider extends EloquentUserProvider
      */
     public function retrieveByToken($identifier, $token)
     {
-        $model = parent::retrieveByToken($identifier, $token);
+        if ($this->createModel() instanceof EloquentModel) {
+            $model = $this->createModel();
+            $model = $model->newQuery()
+                ->where($model->getAuthIdentifierName(), $identifier)
+                ->where($model->getRememberTokenName(), $token)
+                ->first();
+        } else {
+            $model = $this->createModel();
+            $repo = \EntityManager::getRepository(get_class($model));
+            return $repo->findOneBy([
+                $model->getAuthIdentifierName() => $identifier,
+                $model->getRememberTokenName() => $token
+            ]);
+        }
 
         return $this->discoverAdldapFromModel($model);
     }
@@ -253,5 +292,29 @@ class AdldapAuthUserProvider extends EloquentUserProvider
     protected function getLoginFallback()
     {
         return Config::get('adldap_auth.login_fallback', false);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function createModel()
+    {
+        $class = '\\'.ltrim($this->model, '\\');
+
+        return new $class;
+    }
+
+    /**
+     * Update the "remember me" token for the given user in storage.
+     *
+     * @param  \Illuminate\Contracts\Auth\Authenticatable $user
+     * @param  string $token
+     * @return void
+     */
+    public function updateRememberToken(Authenticatable $user, $token)
+    {
+        $user->setRememberToken($token);
+
+        $user->save();
     }
 }

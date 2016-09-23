@@ -15,16 +15,15 @@ trait ImportsUsers
      */
     abstract public function createModel();
 
-    /**
-     * Returns an existing or new Eloquent user from the specified Adldap user instance.
-     *
-     * @param User        $user
-     * @param string|null $password
-     *
-     * @return \Illuminate\Database\Eloquent\Model
-     */
-    protected function getModelFromAdldap(User $user, $password = null)
-    {
+    protected function isEloquent() {
+        return array_key_exists('Eloquent', config('app.aliases'));
+    }
+
+    protected function isDoctrine() {
+        return array_key_exists('EntityManager', config('app.aliases'));
+    }
+
+    protected function getModelFromAdldapEloquent(User $user, $password = null) {
         // Get the model key.
         $attributes = $this->getUsernameAttribute();
 
@@ -60,6 +59,60 @@ trait ImportsUsers
         return $model;
     }
 
+    protected function getModelFromAdldapDoctrine(User $user, $password = null) {
+        // Get the model key.
+        $attributes = $this->getUsernameAttribute();
+
+        // Get the model key.
+        $key = key($attributes);
+
+        // Get the username from the AD model.
+        $username = $user->{$attributes[$key]};
+
+        // Make sure we retrieve the first username
+        // result if it's an array.
+        $username = (is_array($username) ? Arr::get($username, 0) : $username);
+
+        // Try to retrieve the model from the model key and AD username.
+        $repo = \EntityManager::getRepository(get_class($this->createModel()));
+        $model = $repo->findOneBy([$key => $username]);
+
+        // Create the model instance of it isn't found.
+        $model = is_object($model) ? $model : $this->createModel();
+
+        // Set the username in case of changes in active directory.
+        $model->{$key} = $username;
+
+        // Sync the users password (if enabled). If no password is
+        // given, we'll assign a random 16 character string.
+        $model = $this->syncModelPassword($model, $password ?: str_random());
+
+        // Synchronize other active directory attributes on the model.
+        $model = $this->syncModelFromAdldap($user, $model);
+
+        // Bind the Adldap model to the eloquent model (if enabled).
+        $model = ($this->getBindUserToModel() ? $this->bindAdldapToModel($user, $model) : $model);
+
+        return $model;
+    }
+
+    /**
+     * Returns an existing or new Eloquent user from the specified Adldap user instance.
+     *
+     * @param User        $user
+     * @param string|null $password
+     *
+     * @return \Illuminate\Database\Eloquent\Model
+     */
+    protected function getModelFromAdldap(User $user, $password = null)
+    {
+        if ($this->isEloquent()) {
+            return $this->getModelFromAdldapEloquent($user, $password);
+        } elseif ($this->isDoctrine()) {
+            return $this->getModelFromAdldapDoctrine($user, $password);
+        }
+    }
+
     /**
      * Binds the Adldap User instance to the Eloquent model instance
      * by setting its `adldapUser` public property.
@@ -69,7 +122,7 @@ trait ImportsUsers
      *
      * @return Model
      */
-    protected function bindAdldapToModel(User $user, Model $model)
+    protected function bindAdldapToModel(User $user, $model)
     {
         $model->adldapUser = $user;
 
@@ -84,7 +137,7 @@ trait ImportsUsers
      *
      * @return Model
      */
-    protected function syncModelFromAdldap(User $user, Model $model)
+    protected function syncModelFromAdldap($user, $model)
     {
         foreach ($this->getSyncAttributes() as $modelField => $adField) {
             if ($this->isAttributeCallback($adField)) {
@@ -107,7 +160,7 @@ trait ImportsUsers
      *
      * @return Model
      */
-    protected function syncModelPassword(Model $model, $password)
+    protected function syncModelPassword($model, $password)
     {
         // If the developer doesn't want to synchronize AD passwords,
         // we'll set the password to a random 16 character string.
@@ -117,7 +170,11 @@ trait ImportsUsers
         // we'll assume that the dev is using their own
         // encryption method for passwords. Otherwise
         // we'll bcrypt it normally.
-        $model->password = ($model->hasSetMutator('password') ? $password : bcrypt($password));
+        if (method_exists($model, 'hasSetMutator')) {
+            $model->password = ($model->hasSetMutator('password') ? $password : bcrypt($password));
+        } else {
+            $model->password = bcrypt($password);
+        }
 
         return $model;
     }
@@ -129,9 +186,14 @@ trait ImportsUsers
      *
      * @return bool
      */
-    protected function saveModel(Model $model)
+    protected function saveModel($model)
     {
-        return $model->save();
+        if ($this->isEloquent()) {
+            return $model->save();
+        } elseif ($this->isDoctrine()) {
+            \EntityManager::persist($model);
+            \EntityManager::flush();
+        }
     }
 
     /**
