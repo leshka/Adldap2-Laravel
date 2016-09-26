@@ -313,8 +313,12 @@ class AdldapAuthUserProvider implements UserProvider
      */
     public function updateRememberToken(Authenticatable $user, $token)
     {
-        $user->setRememberToken($token);
+        if (method_exists($user, 'setRememberToken')) {
+            $user->setRememberToken($token);
+        }
 
-        $user->save();
+        if (method_exists($user, 'save')) {
+            $user->save();
+        }
     }
 }
